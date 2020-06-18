@@ -1,9 +1,10 @@
 import numpy as np
 import pandas as pd
-from PIL import Image
 import os
+import torch
 from torch.utils.data import Dataset, Subset, DataLoader
 from sklearn.model_selection import train_test_split
+from PIL import Image
 
 
 def load_data(data_path):
@@ -84,3 +85,24 @@ def get_dataloaders(data_path, val_split, transform, dataloader_params):
 
     dataloaders = {k: DataLoader(datasets[k], **dataloader_params) for k in datasets}
     return dataloaders
+
+
+def correct_top_k_per_class(dataloader, model, k_list, n_classes, device):
+    """Computes top-k accuracy for the values of k provided in k_list"""
+    maxk = max(k_list)
+    class_counts = np.zeros(n_classes)
+    class_correct_topk = {k: np.zeros(n_classes) for k in k_list}
+    with torch.no_grad():
+        for inputs, labels in dataloader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            _, topk_pred = outputs.topk(maxk, 1, True, True)
+            topk_pred = topk_pred.t()
+            topk_correct = topk_pred.eq(labels.view(1, -1).expand_as(topk_pred)).cpu().numpy().T
+            labels = labels.cpu().numpy()
+            for i, label in enumerate(labels):
+                class_counts[label] += 1
+                for k in k_list:
+                    class_correct_topk[k][label] += np.sum(topk_correct[i, :k+1])
+            # print({k: class_correct_topk[k] / class_counts for k in k_list})
+    return class_correct_topk, class_counts
