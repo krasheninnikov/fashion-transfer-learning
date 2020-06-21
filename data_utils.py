@@ -1,7 +1,5 @@
-import numpy as np
 import pandas as pd
 import os
-import torch
 from torch.utils.data import Dataset, Subset, DataLoader
 from sklearn.model_selection import train_test_split
 from PIL import Image
@@ -30,17 +28,32 @@ def load_data(data_path):
     return styles_df
 
 
-def data_split_fashion(styles_df):
-    # train / test split: even years in train, odd years in test
-    styles_df_training = styles_df[styles_df['year'] % 2 == 0]
+def train_test_split_fashion(styles_df):
+    """train / test split: even years in train, odd years in test"""
+    styles_df_train = styles_df[styles_df['year'] % 2 == 0]
     styles_df_test = styles_df[styles_df['year'] % 2 == 1]
 
-    # further split the training data into a dataset with 20 most frequent article types and all other article types
-    top20_classes = set(styles_df.groupby(['articleType']).size().nlargest(20).index)
-    styles_df_training_top20 = styles_df_training[styles_df_training['articleType'].isin(top20_classes)]
-    styles_df_training_others = styles_df_training[~styles_df_training['articleType'].isin(top20_classes)]
+    train_classes = set(pd.unique(styles_df_train['articleType']))
+    test_classes = set(pd.unique(styles_df_test['articleType']))
+    print('Splitting the data into test and training set: even years in train, odd years in test.')
+    print('Only {} / {} classes have data samples '
+          'both in the training and the test set.'.format(len(train_classes.intersection(test_classes)),
+                                                          len(train_classes.union(test_classes))))
+    # print('The following classes are present in only the training set or only the test set:')
+    # print(test_classes.symmetric_difference(train_classes))
+    return styles_df_train, styles_df_test
 
-    return styles_df_training_top20, styles_df_training_others, styles_df_test
+
+def train_tune_split_fashion(styles_df_train, sorted_class_names):
+    # further split the training data into a dataset with 20 most frequent article types and all other article types
+    top20_classes = set(sorted_class_names[:20])
+    train_classes = set(styles_df_train.groupby('articleType').size().index)
+    print('Further splitting the training set into a dataset with 20 most frequent classes and all other classes.')
+    print('The training set does not contain {} '
+          'contained in 20 most frequent classes.'.format(top20_classes.difference(train_classes)))
+    styles_df_train_top20 = styles_df_train[styles_df_train['articleType'].isin(top20_classes)]
+    styles_df_train_others = styles_df_train[~styles_df_train['articleType'].isin(top20_classes)]
+    return styles_df_train_top20, styles_df_train_others
 
 
 class FashionDataset(Dataset):
@@ -68,41 +81,27 @@ def train_val_split(dataset, val_split=0.2):
     return Subset(dataset, train_idx), Subset(dataset, val_idx)
 
 
-def get_dataloaders(data_path, val_split, transform, dataloader_params):
-    styles_df = load_data(data_path)
-    styles_df_train_top20, styles_df_train_others, styles_df_test = data_split_fashion(styles_df)
-    sorted_class_names = list(styles_df.groupby(['articleType']).size().sort_values(ascending=False).index)
+def get_dataloaders(styles_df_train,
+                    styles_df_test,
+                    sorted_class_names,
+                    data_path,
+                    val_split,
+                    transform,
+                    dataloader_params):
+    styles_df_train_top20, styles_df_train_others = train_tune_split_fashion(styles_df_train, sorted_class_names)
     class2idx = {c: i for i, c in enumerate(sorted_class_names)}
 
     datasets = {}
+    datasets['train_all'] = FashionDataset(styles_df_train, data_path, transform, class2idx)
+    datasets['train'], datasets['val'] = train_val_split(datasets['train_all'], val_split)
+
     datasets['top20'] = FashionDataset(styles_df_train_top20, data_path, transform, class2idx)
-    datasets['top20_train'], datasets['top20_val'] = train_val_split(datasets['top20'], val_split)
+    datasets['train_top20'], datasets['val_top20'] = train_val_split(datasets['top20'], val_split)
 
     datasets['others'] = FashionDataset(styles_df_train_others, data_path, transform, class2idx)
-    datasets['others_train'], datasets['others_val'] = train_val_split(datasets['others'], val_split)
+    datasets['train_others'], datasets['val_others'] = train_val_split(datasets['others'], val_split)
 
     datasets['test'] = FashionDataset(styles_df_test, data_path, transform, class2idx)
 
     dataloaders = {k: DataLoader(datasets[k], **dataloader_params) for k in datasets}
     return dataloaders
-
-
-def correct_top_k_per_class(dataloader, model, k_list, n_classes, device):
-    """Computes top-k accuracy for the values of k provided in k_list"""
-    maxk = max(k_list)
-    class_counts = np.zeros(n_classes)
-    class_correct_topk = {k: np.zeros(n_classes) for k in k_list}
-    with torch.no_grad():
-        for inputs, labels in dataloader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            _, topk_pred = outputs.topk(maxk, 1, True, True)
-            topk_pred = topk_pred.t()
-            topk_correct = topk_pred.eq(labels.view(1, -1).expand_as(topk_pred)).cpu().numpy().T
-            labels = labels.cpu().numpy()
-            for i, label in enumerate(labels):
-                class_counts[label] += 1
-                for k in k_list:
-                    class_correct_topk[k][label] += np.sum(topk_correct[i, :k+1])
-            # print({k: class_correct_topk[k] / class_counts for k in k_list})
-    return class_correct_topk, class_counts
